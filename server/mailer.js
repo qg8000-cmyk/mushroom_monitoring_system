@@ -1,5 +1,8 @@
 const nodemailer = require('nodemailer');
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_EMAILS = 10;
+
 let transport = null;
 let transportKey = '';
 
@@ -41,42 +44,94 @@ function getTransport() {
   return transport;
 }
 
-/**
- * One message per sustained breach. Returns false when SMTP or the
- * recipient is not configured so telemetry can continue.
- */
-async function sendBreachEmail({ to, deviceId, message, durationMin, reading }) {
-  const recipient = String(to || '').trim();
-  if (!recipient || !recipient.includes('@')) return false;
+function notifyAddresses(notify) {
+  const out = [];
+  const add = (raw) => {
+    const e = String(raw || '').trim().toLowerCase();
+    if (!EMAIL_RE.test(e) || out.includes(e) || out.length >= MAX_EMAILS) return;
+    out.push(e);
+  };
+  if (!notify || typeof notify !== 'object') return out;
+  if (Array.isArray(notify.emails)) notify.emails.forEach(add);
+  add(notify.email);
+  return out;
+}
+
+function readingLines(reading) {
+  const temp = typeof reading?.tempC === 'number' ? `${reading.tempC.toFixed(1)}°C` : '—';
+  const hum = typeof reading?.humPct === 'number' ? `${Math.round(reading.humPct)}%` : '—';
+  const co2 = typeof reading?.co2ppm === 'number' ? `${Math.round(reading.co2ppm)} ppm` : '—';
+  return [`Temperature: ${temp}`, `Humidity: ${hum}`, `CO₂: ${co2}`];
+}
+
+async function sendAlertEmail({ to, deviceId, subject, message, extraLines, reading }) {
+  const list = notifyAddresses({ emails: Array.isArray(to) ? to : [to] });
+  if (!list.length) return false;
   const tx = getTransport();
   const from = fromAddress();
   if (!tx || !from) {
     console.warn('[email] SMTP is not configured (set SMTP_HOST and SMTP_FROM)');
     return false;
   }
-  const temp = typeof reading.tempC === 'number' ? `${reading.tempC.toFixed(1)}°C` : '—';
-  const hum = typeof reading.humPct === 'number' ? `${Math.round(reading.humPct)}%` : '—';
-  const co2 = typeof reading.co2ppm === 'number' ? `${Math.round(reading.co2ppm)} ppm` : '—';
   const text = [
     message,
     '',
-    `This reading has stayed outside the target range for ${durationMin} minutes.`,
+    ...(extraLines || []),
+    extraLines && extraLines.length ? '' : null,
     `Device: ${deviceId}`,
-    `Temperature: ${temp}`,
-    `Humidity: ${hum}`,
-    `CO₂: ${co2}`,
-  ].join('\n');
+    ...readingLines(reading),
+  ]
+    .filter((line) => line != null)
+    .join('\n');
 
   await tx.sendMail({
     from,
-    to: recipient,
-    subject: `Nursery alert: ${message}`,
+    to: list.join(', '),
+    subject: subject || `Nursery alert: ${message}`,
     text,
   });
   return true;
 }
 
+/** One message per sustained breach. */
+async function sendBreachEmail({ to, deviceId, message, durationMin, reading }) {
+  return sendAlertEmail({
+    to,
+    deviceId,
+    message,
+    subject: `Nursery alert: ${message}`,
+    extraLines: [
+      `This reading has stayed outside the target range for ${durationMin} minutes.`,
+    ],
+    reading,
+  });
+}
+
+function dispatchNotifyEmails(deviceId, notify, { subject, message, extraLines }, reading) {
+  const addrs = notifyAddresses(notify);
+  if (!notify || notify.enabled !== true || !addrs.length) return;
+  sendAlertEmail({
+    to: addrs,
+    deviceId,
+    subject,
+    message,
+    extraLines,
+    reading,
+  })
+    .then((sent) => {
+      if (sent) console.log(`[email] device=${deviceId} to=${addrs.length} ${subject || message}`);
+    })
+    .catch((e) => {
+      console.warn(`[email] device=${deviceId} send failed:`, e.message);
+    });
+}
+
 module.exports = {
+  EMAIL_RE,
+  MAX_EMAILS,
   smtpConfigured,
+  notifyAddresses,
+  sendAlertEmail,
   sendBreachEmail,
+  dispatchNotifyEmails,
 };

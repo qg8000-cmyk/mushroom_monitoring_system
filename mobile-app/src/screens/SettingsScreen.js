@@ -64,7 +64,7 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
   const navigation = useNavigation();
   const { deviceId, setDeviceId, loading: deviceIdLoading } = deviceIdState;
   const serverConfig = useServerConfig();
-  const { derived, control, refreshControl } = useSharedNurseryLive();
+  const { derived, control, live, refreshControl } = useSharedNurseryLive();
 
   const [pendingServerUrl, setPendingServerUrl] = useState('');
   const [pendingApiKey, setPendingApiKey] = useState('');
@@ -92,6 +92,10 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
   const [currentPass, setCurrentPass] = useState('');
   const [newPass, setNewPass] = useState('');
   const [changingCreds, setChangingCreds] = useState(false);
+  const [deviceSsid, setDeviceSsid] = useState('');
+  const [deviceWifiPass, setDeviceWifiPass] = useState('');
+  const [savingWifi, setSavingWifi] = useState(false);
+  const [tab, setTab] = useState('ranges');
 
   useEffect(() => {
     if (serverConfig.hydrated) {
@@ -101,6 +105,16 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
   }, [serverConfig.hydrated, serverConfig.baseUrl, serverConfig.apiKey]);
 
   useEffect(() => setPendingDeviceId(deviceId), [deviceId]);
+  useEffect(() => {
+    const liveSsid = live?.value?.wifiSsid;
+    const controlSsid = control?.value?.wifiSsid;
+    const next = typeof liveSsid === 'string' && liveSsid.trim()
+      ? liveSsid
+      : typeof controlSsid === 'string' && controlSsid.trim()
+        ? controlSsid
+        : '';
+    if (next && !deviceSsid) setDeviceSsid(next);
+  }, [live?.value?.wifiSsid, control?.value?.wifiSsid, deviceSsid]);
   useEffect(() => {
     getLocalCreds()
       .then((c) => setAdminUser(c.username))
@@ -233,6 +247,7 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
         heaterMinOffSec: heaterMinOffSec.trim() === '' ? DEFAULTS.heaterMinOff : Number(heaterMinOffSec),
         // Saving ranges means automatic control — release any leftover overrides
         // (e.g. exhaust held OFF) so the new max can actually move the relays.
+        autoMode: true,
         manualOverride: false,
         manualFanOn: false,
         manualIntakeFanOverride: false,
@@ -289,6 +304,55 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
     }
   }
 
+  async function saveDeviceWifi() {
+    const ssid = deviceSsid.trim();
+    if (!ssid) return Alert.alert('Wi‑Fi name required', 'Enter the SSID the nursery should join.');
+    setSavingWifi(true);
+    const body = `ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(deviceWifiPass)}`;
+    const localUrls = ['http://192.168.4.1/wifi', 'http://192.168.4.100/wifi'];
+    let localOk = false;
+    for (const url of localUrls) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body,
+        });
+        if (res.ok) {
+          localOk = true;
+          break;
+        }
+      } catch {
+        /* phone is not on the setup hotspot */
+      }
+    }
+    try {
+      if (derived.online) {
+        const saved = await apiPut(devicePath(deviceId, 'wifi'), { ssid, password: deviceWifiPass });
+        setDeviceWifiPass('');
+        Alert.alert('Wi‑Fi sent', saved?.message || `The nursery will join “${ssid}”.`);
+        refreshControl?.();
+        return;
+      }
+      if (localOk) {
+        setDeviceWifiPass('');
+        Alert.alert(
+          'Saved on the device',
+          `The nursery will try to join “${ssid}”. Stay on MushroomNursery-Setup, wait 15 seconds, then reload http://192.168.4.1 — it should say Connected.`
+        );
+        return;
+      }
+      Alert.alert(
+        'Device is offline',
+        'Turn off mobile data. Join Wi‑Fi named MushroomNursery-Setup (not your house Wi‑Fi). Then open Chrome and go to http://192.168.4.1 — not this app. If that name is missing from Wi‑Fi list, the new firmware is not on the ESP32 yet.'
+      );
+    } catch (e) {
+      Alert.alert('Could not update Wi‑Fi', String(e?.message || e));
+    } finally {
+      setSavingWifi(false);
+    }
+  }
+
   if (deviceIdLoading) {
     return (
       <View style={[styles.center, { backgroundColor: t.bg }]}>
@@ -297,15 +361,51 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
     );
   }
 
+  const tabs = [
+    { id: 'ranges', label: 'Ranges' },
+    { id: 'alerts', label: 'Alerts' },
+    { id: 'wifi', label: 'Wi‑Fi' },
+    { id: 'phone', label: 'Phone' },
+    { id: 'account', label: 'Account' },
+  ];
+
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
       <View style={{ flex: 1, backgroundColor: t.bg }}>
         <AppHeader title="Settings" />
         <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.tabBarWrap}
+          contentContainerStyle={styles.tabBar}
+        >
+          {tabs.map((item) => {
+            const active = tab === item.id;
+            return (
+              <Pressable
+                key={item.id}
+                onPress={() => setTab(item.id)}
+                style={[
+                  styles.tab,
+                  {
+                    backgroundColor: active ? palette.forestDeep : t.surface,
+                    borderColor: active ? palette.forestDeep : t.border,
+                  },
+                ]}
+              >
+                <Text style={[styles.tabText, { color: active ? 'white' : t.sub }]}>{item.label}</Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+        <ScrollView
           contentContainerStyle={[styles.container, { paddingBottom: 36 + insets.bottom }]}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
         >
-          <Text style={[styles.section, { color: t.text }]}>1. Target ranges</Text>
+          {tab === 'ranges' ? (
+            <>
+          <Text style={[styles.section, { color: t.text }]}>Target ranges</Text>
           <Text style={[styles.hint, { color: t.sub }]}>
             Min and max for the grow room. This is what the fans{FEATURES.heater ? ', mister, and heater' : ' and mister'} follow. Use the green button below — not Save connection.
           </Text>
@@ -396,20 +496,79 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
           >
             <Text style={styles.saveBtnText}>{saving ? 'Saving ranges…' : 'Save target ranges'}</Text>
           </Pressable>
+            </>
+          ) : null}
 
-          <Text style={[styles.section, { color: t.text }]}>Notifications</Text>
+          {tab === 'alerts' ? (
+            <>
+          <AlertSettingsCard deviceId={deviceId} />
+          <Text style={[styles.section, { color: t.text }]}>Alert history</Text>
           <View style={[styles.card, { backgroundColor: t.surface }, cardShadow(t.isDark)]}>
             <InfoRow
               icon="notifications-outline"
-              label="Alerts & Notifications"
+              label="Open in-app alert log"
               value="Open"
               t={t}
               onPress={() => navigateRoot(navigation, 'Alerts')}
             />
           </View>
-          <AlertSettingsCard deviceId={deviceId} />
+            </>
+          ) : null}
 
-          <Text style={[styles.section, { color: t.text }]}>2. Phone connection</Text>
+          {tab === 'wifi' ? (
+            <>
+          <Text style={[styles.section, { color: t.text }]}>Device Wi‑Fi</Text>
+          <Text style={[styles.hint, { color: t.sub }]}>
+            Changes the nursery ESP32 network, not this phone. First-time setup: join MushroomNursery-Setup, then open http://192.168.4.1 in Chrome.
+          </Text>
+          <View style={[styles.card, { backgroundColor: t.surface }, cardShadow(t.isDark)]}>
+            <InfoRow
+              icon="wifi-outline"
+              label="Current network"
+              value={
+                control?.value?.wifiPending
+                  ? `Switching to ${control?.value?.wifiSsid || deviceSsid}…`
+                  : live?.value?.wifiSsid || derived.online
+                    ? live?.value?.wifiSsid || 'Online'
+                    : 'Offline'
+              }
+              t={t}
+            />
+            <Text style={[styles.help, { color: t.sub, marginTop: 8 }]}>Wi‑Fi name (SSID)</Text>
+            <TextInput
+              value={deviceSsid}
+              onChangeText={setDeviceSsid}
+              autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="Home-WiFi"
+              placeholderTextColor={t.placeholder}
+              style={[styles.input, { color: t.text, borderColor: t.border, backgroundColor: t.bg }]}
+            />
+            <Text style={[styles.help, { color: t.sub, marginTop: 8 }]}>Wi‑Fi password</Text>
+            <TextInput
+              value={deviceWifiPass}
+              onChangeText={setDeviceWifiPass}
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry
+              placeholder="••••••••"
+              placeholderTextColor={t.placeholder}
+              style={[styles.input, { color: t.text, borderColor: t.border, backgroundColor: t.bg }]}
+            />
+            <Pressable
+              onPress={saveDeviceWifi}
+              disabled={savingWifi}
+              style={[styles.saveBtn, { marginTop: 12, opacity: savingWifi ? 0.7 : 1 }]}
+            >
+              <Text style={styles.saveBtnText}>{savingWifi ? 'Sending…' : 'Save device Wi‑Fi'}</Text>
+            </Pressable>
+          </View>
+            </>
+          ) : null}
+
+          {tab === 'phone' ? (
+            <>
+          <Text style={[styles.section, { color: t.text }]}>Phone connection</Text>
           <Text style={[styles.hint, { color: t.sub }]}>
             Only for this phone: which nursery it talks to. This does not change temperature, humidity, or CO₂ targets.
           </Text>
@@ -457,8 +616,12 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
               </Text>
             </Pressable>
           </View>
+            </>
+          ) : null}
 
-          <Text style={[styles.section, { color: t.text }]}>3. Admin account</Text>
+          {tab === 'account' ? (
+            <>
+          <Text style={[styles.section, { color: t.text }]}>Admin account</Text>
           <View style={[styles.card, { backgroundColor: t.surface }, cardShadow(t.isDark)]}>
             <Text style={[styles.help, { color: t.sub }]}>Username</Text>
             <TextInput value={adminUser} onChangeText={setAdminUser} autoCapitalize="none" style={[styles.input, { color: t.text, borderColor: t.border, backgroundColor: t.bg }]} />
@@ -488,6 +651,8 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
               <Text style={styles.saveBtnText}>Sign out</Text>
             </Pressable>
           </View>
+            </>
+          ) : null}
         </ScrollView>
       </View>
     </KeyboardAvoidingView>
@@ -496,6 +661,15 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
 
 const styles = StyleSheet.create({
   container: { paddingHorizontal: 20, gap: 12 },
+  tabBarWrap: { flexGrow: 0, flexShrink: 0 },
+  tabBar: { paddingHorizontal: 20, paddingBottom: 10, gap: 8, alignItems: 'center' },
+  tab: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  tabText: { fontSize: 13, fontWeight: '800' },
   section: { fontSize: 18, fontWeight: '800', marginTop: 8 },
   hint: { fontSize: 13, fontWeight: '600', lineHeight: 18, marginTop: -4 },
   card: { borderRadius: 20, padding: 14, gap: 8 },

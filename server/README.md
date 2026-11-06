@@ -28,7 +28,7 @@ The repo includes **`render.yaml`** at the **repository root** (Blueprint). You 
 4. **Environment** (recommended):
    - **`API_KEY`**: long random string. The ESP32 **`config.h`** `SERVER_API_KEY` and HTTP header **`X-API-Key`** must match. Leave empty only for unsecured prototypes.
 5. After deploy, copy the public URL (e.g. `https://mushroom-nursery-server.onrender.com`).  
-   - **ESP32 / WiFiManager**: set **Node server base URL** to `https://...` (no trailing slash). `HTTPClient` on ESP32 supports HTTPS.  
+   - **ESP32 / WiFiManager**: set **Node server base URL** to `https://...` (no trailing slash). The sketch uses Espressif `esp_http_client` for HTTP/HTTPS.  
    - **Free tier**: the service **spins down** after idle time; first request after sleep can take **30–60+ seconds** and may time out. For reliable grow-room telemetry use a **paid** instance or keep using a **LAN** server.
 
 Render sets **`PORT`** and **`RENDER`**; the app listens on **`0.0.0.0`** and enables **`trust proxy`** when `RENDER` is set so client IPs in logs work behind Render’s proxy.
@@ -130,7 +130,8 @@ Tighten rules before any real deployment.
 | GET | `/api/devices/:id/report` | 24-hour min/max/avg, actuator duty cycle, and event log |
 | GET | `/api/devices/:id/report.csv` | Same report as CSV |
 | GET | `/api/devices/:id/report.pdf` | Same report as PDF |
-| GET / PUT | `/api/devices/:id/notify` | Email address for alerts after 10 continuous minutes out of range |
+| GET / PUT | `/api/devices/:id/notify` | Email list (`emails`) for out-of-range, back-to-normal, and 10-minute reminder alerts |
+| PUT | `/api/devices/:id/wifi` | One-shot house Wi‑Fi SSID/password for the ESP32 (not stored in Firebase) |
 
 ## Control JSON (`GET` `/api/devices/:id/control`)
 

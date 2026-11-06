@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { apiGet, apiPut, devicePath } from '../lib/api';
-import { loadAlertPrefs, saveAlertPrefs } from '../lib/alertPrefs';
+import { DEFAULT_ALERT_PREFS, loadAlertPrefs, saveAlertPrefs } from '../lib/alertPrefs';
 import { configureAlertChannels, criticalChannelId, playAlertSound } from '../lib/alertSounds';
 import { registerForPushNotificationsAsync } from '../lib/pushNotifications';
 import { palette } from '../theme/palette';
@@ -25,11 +25,15 @@ function Choice({ label, selected, onPress, t, sp }) {
   );
 }
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_EMAILS = 10;
+
 export default function AlertSettingsCard({ deviceId }) {
   const t = useTheme();
   const { dp, sp } = useScale();
-  const [prefs, setPrefs] = useState(null);
-  const [email, setEmail] = useState('');
+  const [prefs, setPrefs] = useState(DEFAULT_ALERT_PREFS);
+  const [emails, setEmails] = useState([]);
+  const [draft, setDraft] = useState('');
   const [emailOn, setEmailOn] = useState(false);
   const [smtpConfigured, setSmtpConfigured] = useState(false);
   const [savingEmail, setSavingEmail] = useState(false);
@@ -44,7 +48,12 @@ export default function AlertSettingsCard({ deviceId }) {
     apiGet(devicePath(deviceId, 'notify'))
       .then((v) => {
         if (!live || !v) return;
-        setEmail(typeof v.email === 'string' ? v.email : '');
+        const list = Array.isArray(v.emails)
+          ? v.emails.filter((e) => typeof e === 'string' && e.includes('@'))
+          : typeof v.email === 'string' && v.email
+            ? [v.email]
+            : [];
+        setEmails(list);
         setEmailOn(v.enabled === true);
         setSmtpConfigured(v.smtpConfigured === true);
       })
@@ -64,20 +73,59 @@ export default function AlertSettingsCard({ deviceId }) {
     return next;
   }
 
+  function addDraftEmail() {
+    const next = draft.trim().toLowerCase();
+    if (!EMAIL_RE.test(next)) {
+      Alert.alert('Email alerts', 'Enter a valid address.');
+      return;
+    }
+    if (emails.includes(next)) {
+      Alert.alert('Email alerts', 'That address is already on the list.');
+      return;
+    }
+    if (emails.length >= MAX_EMAILS) {
+      Alert.alert('Email alerts', `You can add at most ${MAX_EMAILS} addresses.`);
+      return;
+    }
+    setEmails([...emails, next]);
+    setDraft('');
+  }
+
+  function removeEmail(addr) {
+    setEmails(emails.filter((e) => e !== addr));
+  }
+
   async function saveEmail() {
-    const trimmed = email.trim();
-    if (emailOn && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
-      Alert.alert('Email alerts', 'Enter a valid address, or turn email alerts off.');
+    let list = emails;
+    const extra = draft.trim().toLowerCase();
+    if (extra) {
+      if (!EMAIL_RE.test(extra)) {
+        Alert.alert('Email alerts', 'Enter a valid address, or tap Add first.');
+        return;
+      }
+      if (!list.includes(extra)) {
+        if (list.length >= MAX_EMAILS) {
+          Alert.alert('Email alerts', `You can add at most ${MAX_EMAILS} addresses.`);
+          return;
+        }
+        list = [...list, extra];
+        setEmails(list);
+      }
+      setDraft('');
+    }
+    if (emailOn && list.length === 0) {
+      Alert.alert('Email alerts', 'Add at least one address, or turn email alerts off.');
       return;
     }
     setSavingEmail(true);
     try {
-      const saved = await apiPut(devicePath(deviceId, 'notify'), { email: trimmed, enabled: emailOn });
+      const saved = await apiPut(devicePath(deviceId, 'notify'), { emails: list, enabled: emailOn });
+      setEmails(Array.isArray(saved?.emails) ? saved.emails : emails);
       setSmtpConfigured(saved?.smtpConfigured === true);
       Alert.alert(
         'Email alerts saved',
         saved?.smtpConfigured
-          ? 'The server will email this address after 10 minutes outside the target range.'
+          ? 'Each address will be emailed when a reading leaves its target range and again when it returns to normal.'
           : 'Saved on the server. SMTP is not configured yet, so messages will not send until SMTP_HOST and SMTP_FROM are set.'
       );
     } catch (e) {
@@ -87,10 +135,55 @@ export default function AlertSettingsCard({ deviceId }) {
     }
   }
 
-  if (!prefs) return null;
-
   return (
     <View style={{ gap: dp(12) }}>
+      <Text style={{ color: t.text, fontSize: sp(18), fontWeight: '800' }}>Email alerts</Text>
+      <View style={[styles.card, { backgroundColor: t.surface, padding: dp(14), borderRadius: dp(20), gap: dp(8) }, cardShadow(t.isDark)]}>
+        <View style={styles.switchRow}>
+          <Text style={{ color: t.text, fontSize: sp(14), fontWeight: '800', flex: 1 }}>
+            Email when a reading leaves range or returns to normal
+          </Text>
+          <Switch value={emailOn} onValueChange={setEmailOn} thumbColor={palette.forestGreen} />
+        </View>
+        <Text style={{ color: t.sub, fontSize: sp(12) }}>
+          Add every address that should get those messages. A reminder is also sent if a reading stays out of range for 10 minutes.
+        </Text>
+        {emails.map((addr) => (
+          <View key={addr} style={[styles.emailRow, { borderColor: t.border, backgroundColor: t.bg }]}>
+            <Text style={{ color: t.text, fontSize: sp(14), fontWeight: '700', flex: 1 }}>{addr}</Text>
+            <Pressable onPress={() => removeEmail(addr)} hitSlop={8}>
+              <Text style={{ color: palette.forestGreen, fontWeight: '800', fontSize: sp(12) }}>Remove</Text>
+            </Pressable>
+          </View>
+        ))}
+        <View style={styles.addRow}>
+          <TextInput
+            value={draft}
+            onChangeText={setDraft}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="email-address"
+            placeholder="grower@example.com"
+            placeholderTextColor={t.placeholder}
+            style={[styles.input, { color: t.text, borderColor: t.border, backgroundColor: t.bg, fontSize: sp(15), flex: 1 }]}
+            onSubmitEditing={addDraftEmail}
+          />
+          <Pressable onPress={addDraftEmail} style={styles.addBtn}>
+            <Text style={{ color: 'white', fontWeight: '800', fontSize: sp(13) }}>Add</Text>
+          </Pressable>
+        </View>
+        {!smtpConfigured ? (
+          <Text style={{ color: t.sub, fontSize: sp(12) }}>
+            The API process also needs SMTP_HOST and SMTP_FROM before mail can leave the server.
+          </Text>
+        ) : null}
+        <Pressable onPress={saveEmail} disabled={savingEmail} style={[styles.save, { opacity: savingEmail ? 0.6 : 1 }]}>
+          <Text style={{ color: 'white', fontWeight: '800', fontSize: sp(14) }}>
+            {savingEmail ? 'Saving…' : 'Save email alerts'}
+          </Text>
+        </Pressable>
+      </View>
+
       <Text style={{ color: t.text, fontSize: sp(18), fontWeight: '800' }}>Alert sounds</Text>
       <View style={[styles.card, { backgroundColor: t.surface, padding: dp(14), borderRadius: dp(20), gap: dp(10) }, cardShadow(t.isDark)]}>
         <Text style={{ color: t.text, fontSize: sp(14), fontWeight: '800' }}>Warning sound</Text>
@@ -130,36 +223,6 @@ export default function AlertSettingsCard({ deviceId }) {
           />
         </View>
       </View>
-
-      <Text style={{ color: t.text, fontSize: sp(18), fontWeight: '800' }}>Email alerts</Text>
-      <View style={[styles.card, { backgroundColor: t.surface, padding: dp(14), borderRadius: dp(20), gap: dp(8) }, cardShadow(t.isDark)]}>
-        <View style={styles.switchRow}>
-          <Text style={{ color: t.text, fontSize: sp(14), fontWeight: '800', flex: 1 }}>
-            Email after 10 minutes out of range
-          </Text>
-          <Switch value={emailOn} onValueChange={setEmailOn} thumbColor={palette.forestGreen} />
-        </View>
-        <TextInput
-          value={email}
-          onChangeText={setEmail}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="email-address"
-          placeholder="grower@example.com"
-          placeholderTextColor={t.placeholder}
-          style={[styles.input, { color: t.text, borderColor: t.border, backgroundColor: t.bg, fontSize: sp(15) }]}
-        />
-        {!smtpConfigured ? (
-          <Text style={{ color: t.sub, fontSize: sp(12) }}>
-            The API process also needs SMTP_HOST and SMTP_FROM before mail can leave the server.
-          </Text>
-        ) : null}
-        <Pressable onPress={saveEmail} disabled={savingEmail} style={[styles.save, { opacity: savingEmail ? 0.6 : 1 }]}>
-          <Text style={{ color: 'white', fontWeight: '800', fontSize: sp(14) }}>
-            {savingEmail ? 'Saving…' : 'Save email alerts'}
-          </Text>
-        </Pressable>
-      </View>
     </View>
   );
 }
@@ -174,6 +237,24 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   switchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  emailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  addRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  addBtn: {
+    backgroundColor: palette.forestDeep,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   input: {
     borderWidth: 1,
     borderRadius: 12,

@@ -1,3 +1,27 @@
+const fs = require('fs');
+const path = require('path');
+
+function loadLocalEnv() {
+  const envPath = path.join(__dirname, '.env');
+  if (!fs.existsSync(envPath)) return;
+  for (const raw of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq < 1) continue;
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (!process.env[key]) process.env[key] = value;
+  }
+}
+loadLocalEnv();
+
 const express = require('express');
 const cors = require('cors');
 const fb = require('./firebaseControl');
@@ -5,7 +29,7 @@ const PDFDocument = require('pdfkit');
 const { breachMessage, listBreaches } = require('./actions');
 const { buildDailyReport, reportToCsv, writeReportPdf } = require('./reports');
 const { noteBreaches, dispatchBreachEmails } = require('./breach');
-const { smtpConfigured } = require('./mailer');
+const { smtpConfigured, EMAIL_RE, MAX_EMAILS, dispatchNotifyEmails } = require('./mailer');
 
 const app = express();
 if (process.env.RENDER) {
@@ -29,7 +53,7 @@ const HISTORY_DELTA_TEMP_C = 0.5;
 const HISTORY_DELTA_HUM_PCT = 3;
 const HISTORY_DELTA_CO2_PPM = 50;
 const HISTORY_WINDOW_MS = 24 * 60 * 60 * 1000;
-const ONLINE_WINDOW_MS = 30 * 1000;
+const ONLINE_WINDOW_MS = 90 * 1000;
 
 async function sendExpoPush(tokens, title, body, data = {}, channelId) {
   if (!tokens.length) return;
@@ -215,7 +239,8 @@ function getOrCreate(deviceId) {
       pushTokens: {},
       alertState: {},
       events: [],
-      notify: { email: '', enabled: false },
+      notify: { emails: [], email: '', enabled: false },
+      pendingWifi: null,
       breach: {},
       anomalyAt: {},
     };
@@ -307,6 +332,7 @@ function withTimeout(promise, ms, fallback) {
 }
 
 const OVERRIDE_ONLY_KEYS = new Set([
+  'autoMode',
   'manualOverride',
   'manualFanOn',
   'manualIntakeFanOverride',
@@ -321,6 +347,41 @@ function isOverrideOnlyPatch(b) {
   const keys = Object.keys(b || {});
   return keys.length > 0 && keys.every((k) => OVERRIDE_ONLY_KEYS.has(k));
 }
+
+app.get('/', (req, res) => {
+  const d = devices.get('nursery-01');
+  const live = d ? liveWithPresence(d) : { online: false };
+  const ssid = typeof live.wifiSsid === 'string' ? live.wifiSsid : '';
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="refresh" content="8" />
+  <title>Mushroom Nursery API</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; color: #163027; max-width: 40rem; }
+    .ok { color: #2d6a4f; font-weight: 800; }
+    .bad { color: #9b2226; font-weight: 800; }
+    a { color: #0b57d0; }
+    code { background: #f4faf6; padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Mushroom Nursery API</h1>
+  <p>This is the <b>cloud server</b>, not the ESP32 setup page.</p>
+  <p>Device <code>nursery-01</code>:
+    <span class="${live.online ? 'ok' : 'bad'}">${live.online ? 'Online' : 'Offline'}</span>
+    ${ssid ? ` · Wi‑Fi ${ssid}` : ''}
+  </p>
+  <p>Temperature ${live.tempC ?? '—'} °C · Humidity ${live.humPct ?? '—'}% · CO₂ ${live.co2ppm ?? '—'}</p>
+  <p>Use the <b>phone app</b> for the dashboard. Setup hotspot is
+    <code>MushroomNursery-Setup</code> at <code>http://192.168.4.1</code> (join that Wi‑Fi first).</p>
+  <p><a href="/health">/health</a> · <a href="/api/devices/nursery-01/live">/live JSON</a></p>
+</body>
+</html>`);
+});
 
 app.get('/health', (req, res) => {
   res.json({
@@ -485,9 +546,32 @@ app.get('/architecture.pdf', (req, res) => {
   buildArchitecturePdf(res);
 });
 
+function publicControl(d) {
+  const out = { ...(d.control || {}) };
+  const liveSsid = typeof d.live?.wifiSsid === 'string' ? d.live.wifiSsid.trim() : '';
+  if (d.pendingWifi?.ssid) {
+    out.wifiSsid = d.pendingWifi.ssid;
+    out.wifiPending = true;
+  } else if (liveSsid) {
+    out.wifiSsid = liveSsid;
+    out.wifiPending = false;
+  }
+  return out;
+}
+
+function nodeControl(d) {
+  const out = publicControl(d);
+  if (d.pendingWifi?.ssid) {
+    out.wifiSsid = d.pendingWifi.ssid;
+    out.wifiPass = d.pendingWifi.password || '';
+    out.wifiPending = true;
+  }
+  return out;
+}
+
 app.get('/api/devices/:deviceId/control', auth, async (req, res) => {
   const d = await controlReady(req.params.deviceId);
-  sendJson(res, 200, d.control);
+  sendJson(res, 200, publicControl(d));
 });
 
 app.put('/api/devices/:deviceId/control', auth, async (req, res) => {
@@ -560,7 +644,16 @@ app.post('/api/devices/:deviceId/telemetry', auth, async (req, res) => {
   delete live.humMinPct;
   delete live.co2MinPpm;
   delete live.manualOverride;
+  delete live.wifiPass;
   d.live = live;
+  if (
+    d.pendingWifi?.ssid &&
+    typeof b.wifiAck === 'string' &&
+    b.wifiAck.trim() === d.pendingWifi.ssid
+  ) {
+    console.log(`[wifi] device=${deviceId} joined ${d.pendingWifi.ssid}`);
+    d.pendingWifi = null;
+  }
 
   // `live` is a chatty per-5s snapshot; mirror only when values changed at
   // the coarse signature level so RTDB writes stay reasonable.
@@ -666,6 +759,16 @@ app.post('/api/devices/:deviceId/telemetry', auth, async (req, res) => {
               'nursery-critical'
             );
           }
+          dispatchNotifyEmails(
+            deviceId,
+            d.notify,
+            {
+              subject: `Nursery alert: ${body}`,
+              message: body,
+              extraLines: ['A nursery reading has left its target range.'],
+            },
+            b
+          );
           d.alertState[key] = { above: true, lastSentMs: now };
         }
       })
@@ -713,6 +816,12 @@ app.post('/api/devices/:deviceId/telemetry', auth, async (req, res) => {
               'nursery-warning'
             );
           }
+          dispatchNotifyEmails(
+            deviceId,
+            d.notify,
+            { subject: title, message: body, extraLines: ['This reading is back inside its target range.'] },
+            b
+          );
 
           d.alertState[key] = { above: false, lastSentMs: now };
         }
@@ -739,7 +848,7 @@ app.post('/api/devices/:deviceId/telemetry', auth, async (req, res) => {
 
   // Do not await Firebase hydration — the ESP32 TLS session would stall and
   // the next override poll would be delayed by seconds.
-  sendJson(res, 200, { ok: true, control: d.control });
+  sendJson(res, 200, { ok: true, control: nodeControl(d) });
 });
 
 function liveWithPresence(d) {
@@ -804,9 +913,16 @@ const EVENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const ANOMALY_COOLDOWN_MS = 10 * 60 * 1000;
 
 function normalizeNotify(raw) {
-  const email = typeof raw?.email === 'string' ? raw.email.trim().slice(0, 200) : '';
-  const enabled = raw?.enabled === true && email.includes('@');
-  return { email, enabled };
+  const emails = [];
+  const add = (value) => {
+    const e = String(value || '').trim().toLowerCase().slice(0, 200);
+    if (!EMAIL_RE.test(e) || emails.includes(e) || emails.length >= MAX_EMAILS) return;
+    emails.push(e);
+  };
+  if (Array.isArray(raw?.emails)) raw.emails.forEach(add);
+  add(raw?.email);
+  const enabled = raw?.enabled === true && emails.length > 0;
+  return { emails, email: emails[0] || '', enabled };
 }
 
 function recordEvent(deviceId, d, event) {
@@ -965,16 +1081,57 @@ app.get('/api/devices/:deviceId/notify', auth, (req, res) => {
   res.json({ ...d.notify, smtpConfigured: smtpConfigured() });
 });
 
+app.put('/api/devices/:deviceId/wifi', auth, async (req, res) => {
+  const deviceId = req.params.deviceId;
+  const d = getOrCreate(deviceId);
+  const body = req.body || {};
+  const ssid = typeof body.ssid === 'string' ? body.ssid.trim() : '';
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (!ssid || ssid.length > 32) {
+    return res.status(400).json({ error: 'Enter a Wi‑Fi name (SSID) of 1–32 characters.' });
+  }
+  if (password.length > 64) {
+    return res.status(400).json({ error: 'Wi‑Fi password must be at most 64 characters.' });
+  }
+  d.pendingWifi = { ssid, password, tsMs: Date.now() };
+  console.log(`[wifi] device=${deviceId} pending SSID=${ssid}`);
+  sendJson(res, 200, {
+    ok: true,
+    wifiSsid: ssid,
+    wifiPending: true,
+    message: 'The nursery will switch networks on its next check-in (about 15 seconds) while it is online.',
+  });
+});
+
 app.put('/api/devices/:deviceId/notify', auth, async (req, res) => {
   const deviceId = req.params.deviceId;
   const d = getOrCreate(deviceId);
   const body = req.body || {};
-  const email = typeof body.email === 'string' ? body.email.trim().slice(0, 200) : d.notify.email;
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (body.emails != null && !Array.isArray(body.emails)) {
+    return res.status(400).json({ error: 'emails must be a list of addresses.' });
+  }
+  if (typeof body.email === 'string' && body.email.trim() && !EMAIL_RE.test(body.email.trim())) {
     return res.status(400).json({ error: 'Enter a valid email address.' });
   }
+  if (Array.isArray(body.emails)) {
+    for (const item of body.emails) {
+      if (typeof item === 'string' && item.trim() && !EMAIL_RE.test(item.trim())) {
+        return res.status(400).json({ error: `Invalid email: ${item}` });
+      }
+    }
+  }
   const enabled = typeof body.enabled === 'boolean' ? body.enabled : d.notify.enabled;
-  d.notify = { email, enabled: enabled && !!email };
+  d.notify = normalizeNotify({
+    emails: Array.isArray(body.emails)
+      ? body.emails
+      : typeof body.email === 'string'
+        ? [body.email]
+        : d.notify.emails,
+    enabled,
+  });
+  if (enabled && !d.notify.emails.length) {
+    return res.status(400).json({ error: 'Add at least one email, or turn email alerts off.' });
+  }
   try {
     await fb.saveNotify(deviceId, d.notify);
   } catch (e) {

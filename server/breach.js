@@ -1,5 +1,5 @@
 const { breachMessage, listBreaches } = require('./actions');
-const { sendBreachEmail } = require('./mailer');
+const { notifyAddresses, sendBreachEmail } = require('./mailer');
 
 const BREACH_MS = 10 * 60 * 1000;
 
@@ -43,14 +43,15 @@ function noteBreaches(breachState, reading, control, now) {
 
 function dispatchBreachEmails(deviceId, notify, due, reading) {
   if (!due.length) return;
-  if (!notify || !notify.enabled || !notify.email) {
+  const addrs = notifyAddresses(notify);
+  if (!notify || notify.enabled !== true || !addrs.length) {
     console.log(`[email] device=${deviceId} breach ready but email alerts are off`);
     return;
   }
   for (const item of due) {
     const durationMin = Math.max(10, Math.round(item.durationMs / 60000));
     sendBreachEmail({
-      to: notify.email,
+      to: addrs,
       deviceId,
       message: item.message,
       durationMin,
