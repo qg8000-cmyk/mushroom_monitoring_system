@@ -47,6 +47,8 @@ function defaultControl() {
     co2MinPpm: 1000,
     tempMinC: 21,
     humMinPct: 80,
+    // system-wide: true = sensors drive relays; false = app switches only
+    autoMode: true,
     // exhaust fan manual override
     manualOverride: false,
     manualFanOn: false,
@@ -86,27 +88,26 @@ function defaultControl() {
  * mergeControlToFirebase. `int: true` rounds before range-checking.
  */
 const CONTROL_NUM_FIELDS = [
-  // upper bounds
-  { key: 'co2ThresholdPpm', min: 400, max: 10000, int: true },
-  { key: 'tempFanOnC',      min: 15,  max: 45 },
-  { key: 'humFanOnPct',     min: 55,  max: 100 },
-  // lower bounds
-  { key: 'co2MinPpm',       min: 300, max: 5000, int: true },
-  { key: 'tempMinC',        min: 5,   max: 30 },
-  { key: 'humMinPct',       min: 30,  max: 95 },
-  // sprinkler hysteresis + timers
-  { key: 'sprinklerOnHumPct',  min: 30, max: 95 },
-  { key: 'sprinklerOffHumPct', min: 35, max: 100 },
+  // Sensor min/max: any finite value; crossing is rejected in PUT.
+  { key: 'co2ThresholdPpm', int: true, free: true },
+  { key: 'tempFanOnC',      free: true },
+  { key: 'humFanOnPct',     free: true },
+  { key: 'co2MinPpm',       int: true, free: true },
+  { key: 'tempMinC',        free: true },
+  { key: 'humMinPct',       free: true },
+  { key: 'sprinklerOnHumPct',  free: true },
+  { key: 'sprinklerOffHumPct', free: true },
   { key: 'sprinklerMaxOnSec',  min: 5,  max: 600,  int: true },
   { key: 'sprinklerMinOffSec', min: 30, max: 3600, int: true },
   // heater hysteresis + timers
-  { key: 'heaterOnTempC',  min: 5,   max: 28 },
-  { key: 'heaterOffTempC', min: 6,   max: 30 },
+  { key: 'heaterOnTempC',  free: true },
+  { key: 'heaterOffTempC', free: true },
   { key: 'heaterMaxOnSec', min: 30,  max: 3600, int: true },
   { key: 'heaterMinOffSec', min: 15, max: 1800, int: true },
 ];
 
 const CONTROL_BOOL_FIELDS = [
+  'autoMode',
   'manualOverride',
   'manualFanOn',
   'intakeFanEnabled',
@@ -125,7 +126,7 @@ function coerceNumField(raw, spec) {
   if (typeof v === 'string' && v.trim() !== '') v = Number(v);
   if (typeof v !== 'number' || !Number.isFinite(v)) return undefined;
   const n = spec.int ? Math.round(v) : v;
-  if (n < spec.min || n > spec.max) return undefined;
+  if (!spec.free && (n < spec.min || n > spec.max)) return undefined;
   return n;
 }
 
@@ -138,6 +139,26 @@ function applyControlSnapshot(control, raw) {
   for (const key of CONTROL_BOOL_FIELDS) {
     if (typeof raw[key] === 'boolean') control[key] = raw[key];
   }
+}
+
+function invalidControlFields(raw) {
+  if (!raw || typeof raw !== 'object') return [];
+  const bad = [];
+  for (const spec of CONTROL_NUM_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(raw, spec.key)) continue;
+    let v = raw[spec.key];
+    if (v === undefined || v === null || v === '') continue;
+    if (typeof v === 'string' && v.trim() !== '') v = Number(v);
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      bad.push(`${spec.key} must be a number`);
+      continue;
+    }
+    const n = spec.int ? Math.round(v) : v;
+    if (!spec.free && (n < spec.min || n > spec.max)) {
+      bad.push(`${spec.key} must be ${spec.min}–${spec.max}`);
+    }
+  }
+  return bad;
 }
 
 function getFirebaseContext() {
@@ -520,6 +541,7 @@ module.exports = {
   warmup,
   defaultControl,
   applyControlSnapshot,
+  invalidControlFields,
   ensureControlSubscription,
   loadControl,
   mergeControlToFirebase,

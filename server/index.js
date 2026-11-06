@@ -296,7 +296,7 @@ function getOrCreate(deviceId) {
     if (!d || !incoming) return;
     const incomingTs = typeof incoming.updatedAtMs === 'number' ? incoming.updatedAtMs : 0;
     // A newer PUT in memory wins over a stale RTDB snapshot (defaults / old ranges).
-    if (d.controlUpdatedAtMs && incomingTs < d.controlUpdatedAtMs) return;
+    if (d.controlUpdatedAtMs && incomingTs <= d.controlUpdatedAtMs) return;
     fb.applyControlSnapshot(d.control, incoming);
     if (incomingTs > (d.controlUpdatedAtMs || 0)) d.controlUpdatedAtMs = incomingTs;
   });
@@ -453,7 +453,7 @@ function buildArchitecturePdf(res) {
   drawBox(doc, leftX, topY, boxW, boxH, 'ESP32 (MushroomNursery)', 'DHT22 + SCD41, relay fan, WiFiManager');
   drawBox(doc, leftX, topY + gapY, boxW, boxH, 'WiFiManager portal', 'Wi‑Fi creds + server base URL (NVS)');
 
-  drawBox(doc, midX, topY, boxW, boxH, 'Render Web Service', 'https://mushroom-nursery-server.onrender.com');
+  drawBox(doc, midX, topY, boxW, boxH, 'Render Web Service', 'https://mushroom-monitoring-system-zqz9.onrender.com');
   drawBox(doc, midX, topY + gapY, boxW, boxH, 'Node API (Express)', '/control, /telemetry, /live, /history24h');
 
   drawBox(doc, rightX, topY, boxW, boxH, 'Firebase RTDB', 'devices/<deviceId>/{control,live,history24h,alerts}');
@@ -578,10 +578,24 @@ app.put('/api/devices/:deviceId/control', auth, async (req, res) => {
   const deviceId = req.params.deviceId;
   const d = getOrCreate(deviceId);
   const b = req.body || {};
+  const bad = fb.invalidControlFields(b);
+  if (bad.length) {
+    return sendJson(res, 400, { error: bad.join('. ') });
+  }
   const beforeControl = { ...d.control };
 
   // Memory is authoritative for the ESP32 + app. Firebase is a best-effort mirror.
   fb.applyControlSnapshot(d.control, b);
+  const c = d.control;
+  if (typeof c.co2MinPpm === 'number' && typeof c.co2ThresholdPpm === 'number' && c.co2MinPpm >= c.co2ThresholdPpm) {
+    return sendJson(res, 400, { error: 'CO₂ min must be less than CO₂ max.' });
+  }
+  if (typeof c.tempMinC === 'number' && typeof c.tempFanOnC === 'number' && c.tempMinC >= c.tempFanOnC) {
+    return sendJson(res, 400, { error: 'Temp min must be less than temp max.' });
+  }
+  if (typeof c.humMinPct === 'number' && typeof c.humFanOnPct === 'number' && c.humMinPct >= c.humFanOnPct) {
+    return sendJson(res, 400, { error: 'Humidity min must be less than humidity max.' });
+  }
   const now = Date.now();
   logOverrideTransitions(deviceId, d, beforeControl, d.control, now);
   d.control.updatedAtMs = now;

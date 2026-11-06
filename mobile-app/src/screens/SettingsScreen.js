@@ -17,7 +17,7 @@ import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppHeader, navigateRoot } from '../components/ui';
 import { apiPut, devicePath, pingServer } from '../lib/api';
-import { DEFAULT_SERVER_BASE_URL, useServerConfig } from '../lib/config';
+import { DEFAULT_SERVER_BASE_URL, getServerBaseUrl, setServerBaseUrl, useServerConfig } from '../lib/config';
 import { FEATURES } from '../lib/features';
 import { changeLocalCreds, getLocalCreds } from '../lib/localAuth';
 import { useSharedNurseryLive } from '../lib/NurseryLiveContext';
@@ -30,9 +30,10 @@ function Field({ label, value, onChangeText, placeholder, keyboardType, t }) {
     <View style={{ flex: 1 }}>
       <Text style={[styles.help, { color: t.sub }]}>{label}</Text>
       <TextInput
-        value={value}
+        value={value == null ? '' : String(value)}
         onChangeText={onChangeText}
-        keyboardType={keyboardType}
+        editable
+        keyboardType={keyboardType || 'numeric'}
         placeholder={placeholder}
         placeholderTextColor={t.placeholder}
         style={[styles.input, { color: t.text, borderColor: t.border, backgroundColor: t.bg }]}
@@ -122,14 +123,23 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
   }, []);
 
   const hydratedFor = useRef(null);
+  const rangesDirty = useRef(false);
   useEffect(() => {
     hydratedFor.current = null;
+    rangesDirty.current = false;
   }, [deviceId]);
+
+  function editRange(setter) {
+    return (text) => {
+      rangesDirty.current = true;
+      setter(text);
+    };
+  }
 
   useEffect(() => {
     const v = control.value;
     if (!v || typeof v !== 'object') return;
-    if (!deviceId || hydratedFor.current === deviceId) return;
+    if (!deviceId || rangesDirty.current || hydratedFor.current === deviceId) return;
     hydratedFor.current = deviceId;
     setCo2Threshold(typeof v.co2ThresholdPpm === 'number' ? String(v.co2ThresholdPpm) : '');
     setTempFanOnC(typeof v.tempFanOnC === 'number' ? String(v.tempFanOnC) : '');
@@ -160,44 +170,30 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
     heaterMaxOn: 900, heaterMinOff: 60,
   };
 
+  function numField(raw, fallback) {
+    const s = String(raw ?? '').trim().replace(',', '.');
+    if (!s) return fallback;
+    return Number(s);
+  }
+
   function validate() {
     const nextDeviceId = pendingDeviceId.trim();
     if (!nextDeviceId) return { ok: false, message: 'Device ID is required.' };
-    const thr = co2Threshold.trim() === '' ? DEFAULTS.co2Max : Number(co2Threshold);
-    if (!Number.isFinite(thr) || thr < 400 || thr > 10000) return { ok: false, message: 'CO₂ max must be 400–10000 ppm.' };
-    const co2Lo = co2MinPpm.trim() === '' ? DEFAULTS.co2Min : Number(co2MinPpm);
-    if (!Number.isFinite(co2Lo) || co2Lo < 300 || co2Lo > 5000) return { ok: false, message: 'CO₂ min must be 300–5000 ppm.' };
+    const thr = numField(co2Threshold, DEFAULTS.co2Max);
+    if (!Number.isFinite(thr)) return { ok: false, message: 'CO₂ max must be a number.' };
+    const co2Lo = numField(co2MinPpm, DEFAULTS.co2Min);
+    if (!Number.isFinite(co2Lo)) return { ok: false, message: 'CO₂ min must be a number.' };
     if (co2Lo >= thr) return { ok: false, message: 'CO₂ min must be less than CO₂ max.' };
-    const tMax = tempFanOnC.trim() === '' ? DEFAULTS.tempMax : Number(tempFanOnC);
-    if (!Number.isFinite(tMax) || tMax < 15 || tMax > 45) return { ok: false, message: 'Temp max must be 15–45 °C.' };
-    const tLo = tempMinC.trim() === '' ? DEFAULTS.tempMin : Number(tempMinC);
-    if (!Number.isFinite(tLo) || tLo < 5 || tLo > 30) return { ok: false, message: 'Temp min must be 5–30 °C.' };
+    const tMax = numField(tempFanOnC, DEFAULTS.tempMax);
+    if (!Number.isFinite(tMax)) return { ok: false, message: 'Temp max must be a number.' };
+    const tLo = numField(tempMinC, DEFAULTS.tempMin);
+    if (!Number.isFinite(tLo)) return { ok: false, message: 'Temp min must be a number.' };
     if (tLo >= tMax) return { ok: false, message: 'Temp min must be less than temp max.' };
-    const h = humFanOnPct.trim() === '' ? DEFAULTS.humMax : Number(humFanOnPct);
-    if (!Number.isFinite(h) || h < 55 || h > 100) return { ok: false, message: 'Humidity max must be 55–100%.' };
-    const hLo = humMinPct.trim() === '' ? DEFAULTS.humMin : Number(humMinPct);
-    if (!Number.isFinite(hLo) || hLo < 30 || hLo > 95) return { ok: false, message: 'Humidity min must be 30–95%.' };
+    const h = numField(humFanOnPct, DEFAULTS.humMax);
+    if (!Number.isFinite(h)) return { ok: false, message: 'Humidity max must be a number.' };
+    const hLo = numField(humMinPct, DEFAULTS.humMin);
+    if (!Number.isFinite(hLo)) return { ok: false, message: 'Humidity min must be a number.' };
     if (hLo >= h) return { ok: false, message: 'Humidity min must be less than humidity max.' };
-    const sOn = sprinklerOnHumPct.trim() === '' ? DEFAULTS.sprinklerOn : Number(sprinklerOnHumPct);
-    if (!Number.isFinite(sOn) || sOn < 30 || sOn > 95) return { ok: false, message: 'Mister ON threshold must be 30–95%.' };
-    const sOff = sprinklerOffHumPct.trim() === '' ? DEFAULTS.sprinklerOff : Number(sprinklerOffHumPct);
-    if (!Number.isFinite(sOff) || sOff < 35 || sOff > 100) return { ok: false, message: 'Mister OFF threshold must be 35–100%.' };
-    if (sOn >= sOff) return { ok: false, message: 'Mister ON must be less than OFF.' };
-    const sMax = sprinklerMaxOnSec.trim() === '' ? DEFAULTS.sprinklerMaxOn : Number(sprinklerMaxOnSec);
-    if (!Number.isFinite(sMax) || sMax < 5 || sMax > 600) return { ok: false, message: 'Mister max burst must be 5–600 s.' };
-    const sMin = sprinklerMinOffSec.trim() === '' ? DEFAULTS.sprinklerMinOff : Number(sprinklerMinOffSec);
-    if (!Number.isFinite(sMin) || sMin < 30 || sMin > 3600) return { ok: false, message: 'Mister cooldown must be 30–3600 s.' };
-    if (FEATURES.heater) {
-      const heatOn = heaterOnTempC.trim() === '' ? DEFAULTS.heaterOn : Number(heaterOnTempC);
-      if (!Number.isFinite(heatOn) || heatOn < 5 || heatOn > 28) return { ok: false, message: 'Heater ON must be 5–28 °C.' };
-      const heatOff = heaterOffTempC.trim() === '' ? DEFAULTS.heaterOff : Number(heaterOffTempC);
-      if (!Number.isFinite(heatOff) || heatOff < 6 || heatOff > 30) return { ok: false, message: 'Heater OFF must be 6–30 °C.' };
-      if (heatOn >= heatOff) return { ok: false, message: 'Heater ON must be lower than OFF.' };
-      const heatMax = heaterMaxOnSec.trim() === '' ? DEFAULTS.heaterMaxOn : Number(heaterMaxOnSec);
-      if (!Number.isFinite(heatMax) || heatMax < 30 || heatMax > 3600) return { ok: false, message: 'Heater max burst must be 30–3600 s.' };
-      const heatMin = heaterMinOffSec.trim() === '' ? DEFAULTS.heaterMinOff : Number(heaterMinOffSec);
-      if (!Number.isFinite(heatMin) || heatMin < 15 || heatMin > 1800) return { ok: false, message: 'Heater cooldown must be 15–1800 s.' };
-    }
     return { ok: true, message: '' };
   }
 
@@ -217,6 +213,23 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
     }
   }
 
+  async function putControl(id, body) {
+    try {
+      return await apiPut(devicePath(id, 'control'), body, { timeoutMs: 30000 });
+    } catch (e) {
+      const msg = String(e?.message || e);
+      const base = getServerBaseUrl();
+      const stale =
+        /HTTP 404/i.test(msg) ||
+        (base && base.includes('mushroom-nursery-server.onrender.com'));
+      if (stale && base !== DEFAULT_SERVER_BASE_URL) {
+        await setServerBaseUrl(DEFAULT_SERVER_BASE_URL);
+        return apiPut(devicePath(id, 'control'), body, { timeoutMs: 30000 });
+      }
+      throw new Error(`${msg}\n(${base || 'no server URL'})`);
+    }
+  }
+
   async function save() {
     const v = validate();
     if (!v.ok) {
@@ -227,24 +240,30 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
     try {
       const nextDeviceId = pendingDeviceId.trim();
       if (nextDeviceId !== deviceId) await setDeviceId(nextDeviceId);
-      const saved = await apiPut(devicePath(nextDeviceId, 'control'), {
-        co2ThresholdPpm: co2Threshold.trim() === '' ? DEFAULTS.co2Max : Number(co2Threshold),
-        tempFanOnC: tempFanOnC.trim() === '' ? DEFAULTS.tempMax : Number(tempFanOnC),
-        humFanOnPct: humFanOnPct.trim() === '' ? DEFAULTS.humMax : Number(humFanOnPct),
-        co2MinPpm: co2MinPpm.trim() === '' ? DEFAULTS.co2Min : Number(co2MinPpm),
-        tempMinC: tempMinC.trim() === '' ? DEFAULTS.tempMin : Number(tempMinC),
-        humMinPct: humMinPct.trim() === '' ? DEFAULTS.humMin : Number(humMinPct),
+      const co2Max = numField(co2Threshold, DEFAULTS.co2Max);
+      const co2Lo = numField(co2MinPpm, DEFAULTS.co2Min);
+      const tMax = numField(tempFanOnC, DEFAULTS.tempMax);
+      const tLo = numField(tempMinC, DEFAULTS.tempMin);
+      const hMax = numField(humFanOnPct, DEFAULTS.humMax);
+      const hLo = numField(humMinPct, DEFAULTS.humMin);
+      const saved = await putControl(nextDeviceId, {
+        co2ThresholdPpm: co2Max,
+        tempFanOnC: tMax,
+        humFanOnPct: hMax,
+        co2MinPpm: co2Lo,
+        tempMinC: tLo,
+        humMinPct: hLo,
         intakeFanEnabled,
         sprinklerEnabled,
-        sprinklerOnHumPct: sprinklerOnHumPct.trim() === '' ? DEFAULTS.sprinklerOn : Number(sprinklerOnHumPct),
-        sprinklerOffHumPct: sprinklerOffHumPct.trim() === '' ? DEFAULTS.sprinklerOff : Number(sprinklerOffHumPct),
-        sprinklerMaxOnSec: sprinklerMaxOnSec.trim() === '' ? DEFAULTS.sprinklerMaxOn : Number(sprinklerMaxOnSec),
-        sprinklerMinOffSec: sprinklerMinOffSec.trim() === '' ? DEFAULTS.sprinklerMinOff : Number(sprinklerMinOffSec),
+        sprinklerOnHumPct: hLo,
+        sprinklerOffHumPct: hLo + Math.max(2, (hMax - hLo) / 2),
+        sprinklerMaxOnSec: numField(sprinklerMaxOnSec, DEFAULTS.sprinklerMaxOn),
+        sprinklerMinOffSec: numField(sprinklerMinOffSec, DEFAULTS.sprinklerMinOff),
         heaterEnabled: FEATURES.heater ? heaterEnabled : false,
-        heaterOnTempC: heaterOnTempC.trim() === '' ? DEFAULTS.heaterOn : Number(heaterOnTempC),
-        heaterOffTempC: heaterOffTempC.trim() === '' ? DEFAULTS.heaterOff : Number(heaterOffTempC),
-        heaterMaxOnSec: heaterMaxOnSec.trim() === '' ? DEFAULTS.heaterMaxOn : Number(heaterMaxOnSec),
-        heaterMinOffSec: heaterMinOffSec.trim() === '' ? DEFAULTS.heaterMinOff : Number(heaterMinOffSec),
+        heaterOnTempC: tLo,
+        heaterOffTempC: tMax > tLo ? tLo + (tMax - tLo) / 2 : tLo + 1,
+        heaterMaxOnSec: numField(heaterMaxOnSec, DEFAULTS.heaterMaxOn),
+        heaterMinOffSec: numField(heaterMinOffSec, DEFAULTS.heaterMinOff),
         // Saving ranges means automatic control — release any leftover overrides
         // (e.g. exhaust held OFF) so the new max can actually move the relays.
         autoMode: true,
@@ -256,16 +275,24 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
         manualSprinklerOn: false,
         manualHeaterOverride: false,
         manualHeaterOn: false,
-      }, { timeoutMs: 30000 });
+      });
+      setCo2Threshold(String(co2Max));
+      setCo2MinPpm(String(co2Lo));
+      setTempFanOnC(String(tMax));
+      setTempMinC(String(tLo));
+      setHumFanOnPct(String(hMax));
+      setHumMinPct(String(hLo));
+      rangesDirty.current = false;
+      hydratedFor.current = nextDeviceId;
       await refreshControl?.();
-      if (saved?.persisted !== true) {
-        Alert.alert(
-          'Not saved to database',
-          saved?.error || 'The server did not confirm a Firebase write. Check Render logs and RTDB rules.'
-        );
-        return;
-      }
-      Alert.alert('Target ranges saved', `The nursery will use temp ${saved.tempMinC}–${saved.tempFanOnC} °C.`);
+      const keptTemp = saved?.tempFanOnC;
+      const rejected = typeof keptTemp === 'number' && keptTemp !== tMax;
+      Alert.alert(
+        rejected ? 'Range not kept by server' : 'Target ranges saved',
+        rejected
+          ? `You entered ${tLo}–${tMax} °C but the API still has ${saved.tempMinC}–${saved.tempFanOnC} °C. Deploy the latest server so any min/max is allowed, then Save again.`
+          : `Automatic climate will follow ${tLo}–${tMax} °C, humidity ${hLo}–${hMax}%, CO₂ ${co2Lo}–${co2Max} ppm.`
+      );
     } catch (e) {
       Alert.alert('Save failed', String(e?.message || e));
     } finally {
@@ -412,22 +439,22 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
           <View style={[styles.card, { backgroundColor: t.surface }, cardShadow(t.isDark)]}>
             <InfoRow icon="cloud-outline" label="CO₂" value={`${co2MinPpm || DEFAULTS.co2Min} – ${co2Threshold || DEFAULTS.co2Max} ppm`} t={t} />
             <View style={styles.row}>
-              <Field label="Min" value={co2MinPpm} onChangeText={setCo2MinPpm} placeholder="1000" keyboardType="numeric" t={t} />
-              <Field label="Max" value={co2Threshold} onChangeText={setCo2Threshold} placeholder="2000" keyboardType="numeric" t={t} />
+              <Field label="Min" value={co2MinPpm} onChangeText={editRange(setCo2MinPpm)} placeholder="1000" keyboardType="numeric" t={t} />
+              <Field label="Max" value={co2Threshold} onChangeText={editRange(setCo2Threshold)} placeholder="2000" keyboardType="numeric" t={t} />
             </View>
           </View>
           <View style={[styles.card, { backgroundColor: t.surface }, cardShadow(t.isDark)]}>
             <InfoRow icon="water-outline" label="Humidity" value={`${humMinPct || DEFAULTS.humMin} – ${humFanOnPct || DEFAULTS.humMax} %`} t={t} />
             <View style={styles.row}>
-              <Field label="Min" value={humMinPct} onChangeText={setHumMinPct} placeholder="80" keyboardType="decimal-pad" t={t} />
-              <Field label="Max" value={humFanOnPct} onChangeText={setHumFanOnPct} placeholder="90" keyboardType="decimal-pad" t={t} />
+              <Field label="Min" value={humMinPct} onChangeText={editRange(setHumMinPct)} placeholder="80" keyboardType="numeric" t={t} />
+              <Field label="Max" value={humFanOnPct} onChangeText={editRange(setHumFanOnPct)} placeholder="90" keyboardType="numeric" t={t} />
             </View>
           </View>
           <View style={[styles.card, { backgroundColor: t.surface }, cardShadow(t.isDark)]}>
             <InfoRow icon="thermometer-outline" label="Temperature" value={`${tempMinC || DEFAULTS.tempMin} – ${tempFanOnC || DEFAULTS.tempMax} °C`} t={t} />
             <View style={styles.row}>
-              <Field label="Min" value={tempMinC} onChangeText={setTempMinC} placeholder="21" keyboardType="decimal-pad" t={t} />
-              <Field label="Max" value={tempFanOnC} onChangeText={setTempFanOnC} placeholder="27" keyboardType="decimal-pad" t={t} />
+              <Field label="Min" value={tempMinC} onChangeText={editRange(setTempMinC)} placeholder="21" keyboardType="numeric" t={t} />
+              <Field label="Max" value={tempFanOnC} onChangeText={editRange(setTempFanOnC)} placeholder="27" keyboardType="numeric" t={t} />
             </View>
           </View>
 
@@ -489,10 +516,13 @@ export default function SettingsScreen({ deviceIdState, onSignOut }) {
             ) : null}
           </View>
 
+          {!canSave ? (
+            <Text style={[styles.hint, { color: t.sub }]}>{validate().message}</Text>
+          ) : null}
           <Pressable
             onPress={save}
-            disabled={!canSave || saving}
-            style={[styles.saveBtn, { opacity: !canSave || saving ? 0.5 : 1 }]}
+            disabled={saving}
+            style={[styles.saveBtn, { opacity: saving ? 0.5 : 1 }]}
           >
             <Text style={styles.saveBtnText}>{saving ? 'Saving ranges…' : 'Save target ranges'}</Text>
           </Pressable>
